@@ -1,19 +1,37 @@
-import org.eclipse.collections.api.block.procedure.primitive.IntIntProcedure;
-import org.eclipse.collections.api.list.MutableList;
+import java.awt.Color;
+import java.awt.Rectangle;
+import java.awt.Transparency;
+import java.awt.color.ColorSpace;
+import java.awt.image.ColorModel;
+import java.awt.image.ComponentColorModel;
+import java.awt.image.ComponentSampleModel;
+import java.awt.image.DataBuffer;
+import java.awt.image.Raster;
+import java.awt.image.RenderedImage;
+import java.awt.image.SampleModel;
+import java.awt.image.WritableRaster;
+import java.io.BufferedOutputStream;
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.ObjectInputStream;
+import java.util.Vector;
+import javax.imageio.IIOImage;
+import javax.imageio.ImageWriteParam;
+import javax.imageio.ImageWriter;
+import javax.imageio.stream.ImageOutputStream;
 import org.eclipse.collections.api.tuple.primitive.IntIntPair;
-
 import javax.imageio.ImageIO;
 import javax.imageio.ImageReadParam;
 import javax.imageio.ImageReader;
 import javax.imageio.stream.ImageInputStream;
-import java.awt.*;
 import java.awt.image.BufferedImage;
-import java.io.*;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collections;
-import java.util.Iterator;
 import java.util.zip.InflaterInputStream;
 import java.util.zip.ZipInputStream;
 
@@ -23,7 +41,6 @@ public class PiecewiseImageReaderWriter {
     private static final int HEATMAP_OFFSET_X = -1152; // never change these
     private static final int HEATMAP_OFFSET_Y = -2496; // never change these
     private static final int HEATMAP_SENSITIVITY = 4;
-    private static final int N = 10;
     private static final double HEATMAP_TRANSPARENCY = 0.65;
     private static int currentTileIndex = 0;
     // An array that holds the (encoded) heatmap coordinates along
@@ -45,44 +62,49 @@ public class PiecewiseImageReaderWriter {
         System.out.println("Input image: " + inputImageName);
         System.out.println("Output image: " + outputImageName);
         InputStream inputStream = PiecewiseImageReaderWriter.class.getClassLoader().getResourceAsStream(inputImageName);
-        File outputImage = new File(outputImageName);
+        File outputImageFile = new File(outputImageName);
         if (inputStream == null) {
             System.err.println("Error: resource \"" + inputImageName + "\" doesn't exist");
             System.exit(-1);
         }
 
         // Prepare the image reader
-        Iterator readers = ImageIO.getImageReadersByFormatName("png");
-        ImageReader reader = (ImageReader) readers.next();
-        ImageInputStream iis = ImageIO.createImageInputStream(inputStream);
-        reader.setInput(iis, true);
+		ImageInputStream worldMapImageInputStream = ImageIO.createImageInputStream(inputStream);
+		ImageReader reader = ImageIO.getImageReadersByFormatName("PNG").next();
+        reader.setInput(worldMapImageInputStream, true);
 
-        // N times:
-        for (int i = 0; i < N; i++) {
-            System.out.println("Reading chunk " + (i + 1) + "/" + N + "...");
-            // Read a horizontal stripe of the image that's 1/nth of the height
-            ImageReadParam param = reader.getDefaultReadParam();
-            int imageIndex = 0;
-            int xOffset = 0;
-            int yOffset = reader.getHeight(imageIndex) / N * (i);
-            int width = reader.getWidth(imageIndex);
-            int height = reader.getHeight(imageIndex) / N;
-            Rectangle rect = new Rectangle(xOffset, yOffset, width, height);
-            param.setSourceRegion(rect);
-            BufferedImage bi = reader.read(imageIndex, param);
+		// Prepare the image writer
+		ImageWriter writer = ImageIO.getImageWritersByFormatName("tif").next();
+		FileOutputStream fos = new FileOutputStream(outputImageFile);
+		BufferedOutputStream bos = new BufferedOutputStream(fos);
+		ImageOutputStream ios = ImageIO.createImageOutputStream(bos);
+		writer.setOutput(ios);
+		ImageWriteParam writeParam = writer.getDefaultWriteParam();
+		writeParam.setTilingMode(ImageWriteParam.MODE_EXPLICIT);
+		int tileWidth = 8256;
+		int tileHeight = 496;
+		writeParam.setTiling(tileWidth, tileHeight, 0, 0);
+		final int N = reader.getWidth(0)/tileHeight;
 
-            // Edit the image region
-            bi = processImageRegion(bi, xOffset, yOffset, width, height, heatmap);
-
-            // Write the region to the image in the ImageWriter
-            ImageIO.write(bi, "png", new File(outputImageName + "_" + i));
-        }
-
-        // Close the image reader
-        // Finalize the written image file
+		//	TODO: Make a custom RenderedImage whomst's overrode getData(Rectangle rect)
+		//  function delivers, on demand, that rectangle of image data as a Raster
+		RenderedImage heatmapImage = new HeatmapImage(heatmap, reader, 1, N);
+		writeParam.setCompressionMode(ImageWriteParam.MODE_EXPLICIT);
+		writeParam.setCompressionType("Deflate");
+		writeParam.setCompressionQuality(0);
+		writer.write(null, new IIOImage(heatmapImage, null, null), writeParam);
+		reader.dispose();
+		writer.dispose();
     }
 
-    public static BufferedImage processImageRegion(BufferedImage imageRegion, int regionX, int regionY, int regionWidth, int regionHeight, HeatmapNew heatmap) {
+	/**
+	 * Assumes that the image will be processed in natural reading order (left-to-right, top-to-bottom) otherwise it won't work.
+	 * @param imageRegion
+	 * @param region
+	 * @param heatmap
+	 */
+    public static void processImageRegion(BufferedImage imageRegion, Rectangle region, HeatmapNew heatmap) {
+		// TODO: Make it so that regions can be processed in proper reading order (right now they can but each region has to be full-width) nvm actually dont
         // Initialize values
         if (!processingParametersInitialized) {
             System.out.println("Initializing phase arrays...");
@@ -111,8 +133,8 @@ public class PiecewiseImageReaderWriter {
                 int y = coords[1];
                 int tileValue = tile.getTwo();
 
-                int comparison1 = compareNaturalReadingOrder(x, y, regionX, regionY);
-                int comparison2 = compareNaturalReadingOrder(x, y, regionX + regionWidth, regionY + regionHeight);
+                int comparison1 = compareNaturalReadingOrder(x, y, region.x, region.y);
+                int comparison2 = compareNaturalReadingOrder(x, y, region.x + region.width, region.y + region.height);
                 // If current tile is after bottom right edge of current image region in reading order, return
                 if (comparison2 > 0) break;
                 // If current tile is before upper left edge of current image region, or is out of bounds of the overworld, or hasn't been stepped on, skip
@@ -127,8 +149,8 @@ public class PiecewiseImageReaderWriter {
                 // Reassign the new RGB values to the corresponding 9 pixels (we scale by a factor of 3)
                 for (int x_offset = 0; x_offset <= 2; x_offset++) {
                     for (int y_offset = 0; y_offset <= 2; y_offset++) {
-                        int curX = x - regionX + x_offset;
-                        int curY = y - regionY + y_offset;
+                        int curX = x - region.x + x_offset;
+                        int curY = y - region.y + y_offset;
                         if (curX >= imageRegion.getWidth() || curY >= imageRegion.getHeight())
                             continue;
                         int srcRGB = imageRegion.getRGB(curX, curY);
@@ -142,15 +164,13 @@ public class PiecewiseImageReaderWriter {
                     }
                 }
             }
-            System.out.println("Finished processing image chunk after " + (System.nanoTime() - startTime) / 1_000_000 + " ms (" + numTilesProcessed + " tiles)");
+            System.out.printf("Finished processing image chunk %(4d, %4d, %4d, %4d) after %3d ms (%4d) tiles\n", region.x, region.y, region.width, region.height, (System.nanoTime() - startTime) / 1_000_000, numTilesProcessed);
         } catch (OutOfMemoryError e) {
             e.printStackTrace();
             System.err.println("OutOfMemoryError thrown whilst creating and/or writing image file." + "Perhaps try making a Runelite plugin profile with no other plugins enabled" + "besides World Heatmap. If it works then, then you might have too many plugins" + "running. If not, then I unno chief, perhaps you should submit an issue on the" + "GitHub.");
         } catch (Exception e) {
             e.printStackTrace();
             System.err.println("Exception thrown whilst processing image region.");
-        } finally {
-            return imageRegion;
         }
     }
 
@@ -183,29 +203,6 @@ public class PiecewiseImageReaderWriter {
             short[] coords2 = HeatmapNew.decodeIntCoordinate(tile2.getOne());
             return compareNaturalReadingOrder(coords1[0], -coords1[1], coords2[0], -coords2[1]);
         });
-
-//        sortedHeatmapTiles = new long[heatmap.heatmapHashMap.size()];
-//        for (IntIntPair pair : heatmap.getKeyValuesView())
-//            sortedHeatmapTiles.add((long)pair.getOne() << 32 + (long)pair.getTwo());
-//
-//        sortedHeatmapTiles.sort((tile1, tile2) -> {
-//            short[] coords1 = HeatmapNew.decodeIntCoordinate((int) (tile1 >>> 32));
-//            short[] coords2 = HeatmapNew.decodeIntCoordinate((int) (tile2 >>> 32));
-//            return compareNaturalReadingOrder(coords1[0], -coords1[1], coords2[0], -coords2[1]);
-//        });
-
-//        sortedHeatmapTiles = Arrays.stream(heatmap.getKeyValuesView().toArray()).sorted((tile1, tile2) -> {
-//            short[] coords1 = HeatmapNew.decodeIntCoordinate(((IntIntPair) tile1).getOne());
-//            short[] coords2 = HeatmapNew.decodeIntCoordinate(((IntIntPair) tile2).getOne());
-//            return compareNaturalReadingOrder(coords1[0], -coords1[1], coords2[0], -coords2[1]);
-//        }).iterator();
-
-        // Verify that the tiles are in order
-//        for (IntIntPair pair : sortedHeatmapTiles){
-//            short[] coords = HeatmapNew.decodeIntCoordinate(pair.getOne());
-//            int[] xy = gameCoordsToImageCoords(coords[0], coords[1]);
-//            System.out.printf("(%5d, %5d)\n", xy[0], xy[1]);
-//        }
     }
 
     /**
@@ -251,16 +248,16 @@ public class PiecewiseImageReaderWriter {
             InputStreamReader isr = new InputStreamReader(zis, StandardCharsets.UTF_8);
             BufferedReader reader = new BufferedReader(isr);
             zis.getNextEntry();
-            String[] fieldNames = reader.readLine().split(",");
+			String[] fieldNames = reader.readLine().split(",");
             String[] fieldValues = reader.readLine().split(",");
-            long userID = (fieldValues[0].length() == 0 ? -1 : Long.parseLong(fieldValues[0]));
-            int stepCount = (fieldValues[0].length() == 0 ? -1 : Integer.parseInt(fieldValues[2]));
-            int maxVal = (fieldValues[0].length() == 0 ? -1 : Integer.parseInt(fieldValues[3]));
-            int maxValX = (fieldValues[0].length() == 0 ? -1 : Integer.parseInt(fieldValues[4]));
-            int maxValY = (fieldValues[0].length() == 0 ? -1 : Integer.parseInt(fieldValues[5]));
-            int minVal = (fieldValues[0].length() == 0 ? -1 : Integer.parseInt(fieldValues[6]));
-            int minValX = (fieldValues[0].length() == 0 ? -1 : Integer.parseInt(fieldValues[7]));
-            int minValY = (fieldValues[0].length() == 0 ? -1 : Integer.parseInt(fieldValues[8]));
+            long userID = (fieldValues[0].isEmpty() ? -1 : Long.parseLong(fieldValues[0]));
+            int stepCount = (fieldValues[0].isEmpty() ? -1 : Integer.parseInt(fieldValues[2]));
+            int maxVal = (fieldValues[0].isEmpty() ? -1 : Integer.parseInt(fieldValues[3]));
+            int maxValX = (fieldValues[0].isEmpty() ? -1 : Integer.parseInt(fieldValues[4]));
+            int maxValY = (fieldValues[0].isEmpty() ? -1 : Integer.parseInt(fieldValues[5]));
+            int minVal = (fieldValues[0].isEmpty() ? -1 : Integer.parseInt(fieldValues[6]));
+            int minValX = (fieldValues[0].isEmpty() ? -1 : Integer.parseInt(fieldValues[7]));
+            int minValY = (fieldValues[0].isEmpty() ? -1 : Integer.parseInt(fieldValues[8]));
 
             HeatmapNew heatmapNew;
             if (userID != -1) heatmapNew = new HeatmapNew(userID);
@@ -289,4 +286,194 @@ public class PiecewiseImageReaderWriter {
         }
         return null;
     }
+
+	/**
+	 * Class which calculates osrs heatmap image raster data on demand, or something
+	 */
+	private static class HeatmapImage implements RenderedImage
+	{
+		private final HeatmapNew heatmap;
+		private ImageReader worldMapImageReader = ImageIO.getImageReadersByFormatName("png").next();
+		private final int numXTiles;
+		private final ColorModel colorModel = new ComponentColorModel(ColorSpace.getInstance(ColorSpace.CS_sRGB), false, false, Transparency.OPAQUE, DataBuffer.TYPE_BYTE);
+		private final int numYTiles;
+
+		/**
+		 *
+		 * @param heatmap
+		 * @param worldMapImageReader osrs_world_map.png (8256 x 4992)
+		 * @param numXTiles Image width must be evenly divisible by numXTiles
+		 * @param numYTiles Image width must be evenly divisible by numYTiles
+		 */
+		public HeatmapImage(HeatmapNew heatmap, ImageReader worldMapImageReader, int numXTiles, int numYTiles)
+		{
+			this.heatmap = heatmap;
+			this.worldMapImageReader = worldMapImageReader;
+			this.numXTiles = numXTiles;
+			this.numYTiles = numYTiles;
+			try{
+				if ((worldMapImageReader.getWidth(0) % numXTiles != 0) || (worldMapImageReader.getHeight(0) % numYTiles != 0))
+				{
+					throw new IllegalArgumentException();
+				}
+			}
+			catch (IOException e)
+			{
+				throw new RuntimeException(e);
+			}
+		}
+
+		@Override
+		public Vector<RenderedImage> getSources()
+		{
+			return null;
+		}
+
+		@Override
+		public Object getProperty(String name)
+		{
+			return null;
+		}
+
+		@Override
+		public String[] getPropertyNames()
+		{
+			return new String[0];
+		}
+
+		@Override
+		public ColorModel getColorModel()
+		{
+			return colorModel;
+		}
+
+		@Override
+		public SampleModel getSampleModel()
+		{
+			return new ComponentSampleModel(DataBuffer.TYPE_BYTE, getWidth(), getHeight(), 1, 1, new int[]{0, 0, 0});
+		}
+
+		@Override
+		public int getWidth()
+		{
+			try
+			{
+				return worldMapImageReader.getWidth(0);
+			}
+			catch (IOException e)
+			{
+				throw new RuntimeException(e);
+			}
+		}
+
+		@Override
+		public int getHeight()
+		{
+			try
+			{
+				return worldMapImageReader.getHeight(0);
+			}
+			catch (IOException e)
+			{
+				throw new RuntimeException(e);
+			}
+		}
+
+		@Override
+		public int getMinX()
+		{
+			return 0;
+		}
+
+		@Override
+		public int getMinY()
+		{
+			return 0;
+		}
+
+		@Override
+		public int getNumXTiles()
+		{
+			return numXTiles;
+		}
+
+		@Override
+		public int getNumYTiles()
+		{
+			return numYTiles;
+		}
+
+		@Override
+		public int getMinTileX()
+		{
+			return 0;
+		}
+
+		@Override
+		public int getMinTileY()
+		{
+			return 0;
+		}
+
+		@Override
+		public int getTileWidth()
+		{
+			return getWidth() / numXTiles;
+		}
+
+		@Override
+		public int getTileHeight()
+		{
+			return getHeight() / numYTiles;
+		}
+
+		@Override
+		public int getTileGridXOffset()
+		{
+			return 0;
+		}
+
+		@Override
+		public int getTileGridYOffset()
+		{
+			return 0;
+		}
+
+		@Override
+		public Raster getTile(int tileX, int tileY)
+		{
+			int x = tileX * getTileWidth();
+			int y = tileY * getTileHeight();
+			return getData(new Rectangle(x, y, getTileWidth(), getTileHeight()));
+		}
+
+		@Override
+		public Raster getData()
+		{
+			return getData(new Rectangle(0,0, getWidth(), getHeight()));
+		}
+
+		@Override
+		public Raster getData(Rectangle rect)
+		{
+			ImageReadParam readParam = worldMapImageReader.getDefaultReadParam();
+			readParam.setSourceRegion(rect);
+			try
+			{
+				BufferedImage bi = worldMapImageReader.read(0, readParam);
+				processImageRegion(bi, rect, heatmap);
+				return bi.getData();
+			}
+			catch (IOException e)
+			{
+				throw new RuntimeException(e);
+			}
+		}
+
+		@Override
+		public WritableRaster copyData(WritableRaster raster)
+		{
+			return null;
+		}
+	}
 }
