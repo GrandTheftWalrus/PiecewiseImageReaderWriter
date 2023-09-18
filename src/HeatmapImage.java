@@ -58,7 +58,7 @@ public class HeatmapImage implements RenderedImage
 			worldMapImageReader.getWidth(0);
 			if (worldMapImageReader.getHeight(0) % numYTiles != 0)
 			{
-				throw new IllegalArgumentException();
+				System.out.println("WARNING: Image height " + worldMapImageReader.getHeight(0) + " is not evenly divisible by the number of Y tiles, " + numYTiles + ".");
 			}
 		}
 		catch (IOException e)
