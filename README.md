@@ -1,0 +1,2 @@
+# PiecewiseImageReaderWriter
+I made this program to find out how to read, edit, and write an image one piece at a time in order to conserve memory. I needed to be able to do so with an 8256 x 4992 PNG image, which as raw data in memory would be 117MB, for my RuneLite Plugin [World Heatmap](https://github.com/GrandTheftWalrus/RuneLite-World-Heatmap/tree/master). I was able to reduce peak memory usage from >300MB to 12MB using standard Java libraries.
